@@ -1,0 +1,247 @@
+# Pulls the Billboard hits from playback.fm and populates a CSV for each song
+# with the matching spotify URL.
+#
+# To be used for print and play of a variant of Hitser.
+# See my accompanying game digital-rock-expert that can be played using
+# the CSV as input for a digital version of the game.
+#
+#
+# Author - Steve Holl
+# Initial Release August 2024
+
+import sys
+import os
+import requests
+import csv
+import io
+import re
+from datetime import datetime
+from time import sleep
+
+import qrcode
+import spotipy
+from spotipy.oauth2 import SpotifyClientCredentials
+from bs4 import BeautifulSoup
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import inch
+from reportlab.pdfgen import canvas
+from reportlab.lib.utils import ImageReader
+from fuzzywuzzy import fuzz
+from fuzzywuzzy import process
+from ratelimit import limits, sleep_and_retry
+
+# Set up your Spotify API credentials
+CLIENT_ID =  'REDACTED'
+SECRET = 'REDACTED'
+
+@sleep_and_retry
+@limits(calls=44, period=30)
+def _spotify_search_wrapper(sp,query):
+    '''Wrapper to prevent exceeding spotify rate limits.'''
+    result = sp.search(query, type='track', limit=1)
+    return result
+
+def _clean_artist_name(artist_name):
+    '''Cleans up the artist name to optimize spotify search results.'''
+
+    #strip featured artists out
+
+    try:
+        artist_name = artist_name.lower().split(' feat')[0]
+    except:
+        pass
+
+    try:
+        artist_name = artist_name.lower().split('(feat')[0]
+    except:
+        pass
+
+    try:
+        artist_name = artist_name.lower().split('ft.')[0]
+    except:
+        pass
+
+    try:
+        artist_name = artist_name.replace('&','and')
+    except:
+        pass
+
+    return artist_name
+
+def _clean_title(title):
+    '''Cleans up the title to optimize spotify search results.'''
+
+    #remove apostraphes
+    try:
+        title = title.replace("'","")
+    except:
+        pass
+
+    try:
+      title = re.sub(r'\s*\(.*?\)\s*', ' ', title).strip()
+    except:
+      pass
+
+    return title
+
+def _validate_spotify_url(sp, track_url, artist, title):
+    '''This function tests the spotify URL by getting the URL's artist name and
+    track and doing a fuzzy compare on it. This helps speed the time to audit
+    the results by soring by track or title match score.'''
+    track_id = re.search(r'track/([a-zA-Z0-9]+)', track_url).group(1)
+
+    track = sp.track(track_id)
+    artist_name = track['artists'][0]['name']
+    song_title = track['name']
+
+    artist_sim = fuzz.ratio(artist_name,artist)
+    title_sim = fuzz.ratio(song_title,title)
+
+    return artist_name, artist_sim, song_title, title_sim
+
+def auth_spotify(CLIENT_ID,SECRET):
+  '''Authenticates to spotify and returns an active session.'''
+
+  print('Authenticating to Spotify.')
+
+  try:
+    client_credentials_manager = SpotifyClientCredentials(client_id=CLIENT_ID, \
+                                    client_secret=SECRET)
+    sp = spotipy.Spotify(client_credentials_manager=client_credentials_manager)
+    print('Successfully authenticated to Spotify.\n')
+
+  except:
+    print('***ERROR: Could not authenticate to Spotify***')
+    raise
+  return sp
+
+def get_chart_year_links(spotify_session,url):
+  '''When specified a spotify session and playback.fm URL, scrapes the chart
+   list to return a CSV of songs for each year.'''
+
+  base_url = url.split('/')
+  base_url = base_url[0] + '//' + base_url[2] + '/'
+
+  print(f'Fetching Billboard hits for URL {url}')
+  print(f'===================================================================')
+
+  response = requests.get(url)
+  html_content = response.text
+
+  soup = BeautifulSoup(html_content, 'html.parser')
+  all_years_div = soup.find('div', class_='allYears')
+  links = all_years_div.find_all('a')
+
+  hrefs = [link['href'] for link in links]
+
+  url_list = []
+  for href in hrefs:
+      url_list.append(base_url + href)
+
+  get_chart_year_details(spotify_session,url_list)
+
+def get_chart_year_details(spotify_session, url_list):
+  '''When specifying a spotify session and playback.fm URL for a year of a
+  chart, scrapes the song list.'''
+
+  sp = spotify_session
+  global my_csv
+  my_csv =  []
+  header = ['chart','year','rank','artist','title','track_url','url_artist','artist_score','url_title','title_score']
+  my_csv.append(header)
+
+
+  for url in url_list:
+
+    year = url.split('/')[-1]
+    chart_name = url.split('/')[5]
+
+    print(f'Fetching hits for year {year}')
+
+    response = requests.get(url)
+    html_content = response.text
+
+    soup = BeautifulSoup(html_content, 'html.parser')
+    table = soup.find('table', id='myTable')
+
+    data = []
+
+    for row in table.find_all('tr')[1:]: #
+      title = row.find('a', itemprop='name').text.strip()
+      artist = row.find('a', class_='artist').text.strip()
+      rank = row.find('td').text.strip()
+      track_url = get_track_url_spotify(sp, artist, title, year)
+      a,a_score,b,b_score = _validate_spotify_url(sp,track_url,artist,title)
+      my_csv.append([chart_name,year,rank,artist,title,track_url,a,a_score,b,b_score])
+      #break
+    #break
+
+  filename = f'{chart_name}-{str(datetime.now())}.csv'
+
+  with open(filename, mode='w', newline='') as file:
+    writer = csv.writer(file)
+    writer.writerows(my_csv)
+
+  print(f'\nCSV for Billboard hits written to: {filename}\n\n')
+
+def get_track_url_spotify(sp, artist_name, song_title, year=""):
+    '''Obtains the song URL from the artist name, song title, and year.
+    This may likely exceed Spotify API limits, causing Spotipy API
+    to pause response.'''
+
+    artist_name = _clean_artist_name(artist_name)
+    song_title = _clean_title(song_title)
+
+    query = f"artist:{artist_name} track:{song_title} year:{year}"
+    result = _spotify_search_wrapper(sp,query)
+
+    if result['tracks']['items']:
+        track_url = result['tracks']['items'][0]['external_urls']['spotify']
+        return track_url
+    else:
+        '''try searching without year if we get no results, since hit year
+        may not align with album release year'''
+
+        query = f"artist:{artist_name} track:{song_title}"
+        result = _spotify_search_wrapper(sp,query)
+        if result['tracks']['items']:
+            track_url = result['tracks']['items'][0]['external_urls']['spotify']
+            return track_url
+        else:
+            '''Sometimes structured search fails so try unstructured with year'''
+            query = "f{artist_name} {song_title} {year}"
+            result = _spotify_search_wrapper(sp,query)
+            if result['tracks']['items']:
+                track_url = result['tracks']['items'][0]['external_urls']['spotify']
+                return track_url
+            else:
+                '''Try unstructured search without year'''
+                query = f"{artist_name} {song_title}"
+                result = _spotify_search_wrapper(sp,query)
+                if result['tracks']['items']:
+                    track_url = result['tracks']['items'][0]['external_urls']['spotify']
+                    return track_url
+                else:
+                    print(f"INFO: Could not fetch URL for {year} {artist_name} {song_title}")
+                    return None
+
+
+# ########################################################################
+# This is example code to run and populate the billboard hit csvs. 
+# See the /charts folder for ones that have already been pulled down.
+# ########################################################################
+
+my_csv = [] #this is a global variable
+url_list = []
+sp = auth_spotify(CLIENT_ID, SECRET)
+
+get_chart_year_links(sp,'https://playback.fm/charts/rock/')
+# get_chart_year_links(sp,'https://playback.fm/charts/top-100-songs')
+# get_chart_year_links(sp,'https://playback.fm/charts/country/')
+# get_chart_year_links(sp,'https://playback.fm/charts/rnb/')
+
+filename = f'hitlist-{str(datetime.now())}.csv'
+
+with open(filename, mode='w', newline='') as file:
+  writer = csv.writer(file)
+  writer.writerows(my_csv)
