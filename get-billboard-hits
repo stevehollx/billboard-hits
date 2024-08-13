@@ -1,7 +1,9 @@
 # Pulls the Billboard hits from playback.fm and populates a CSV for each song
 # with the matching spotify URL.
 #
-# To be used for print and play of a variant of Hitser.
+# To be used for print and play of a song guessing game, or perhaps for
+# other purposes as well.
+#
 # See my accompanying game digital-rock-expert that can be played using
 # the CSV as input for a digital version of the game.
 #
