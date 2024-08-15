@@ -1,12 +1,15 @@
+# -*- coding: utf-8 -*-
+"""getbillboardhits"""
+
 # Pulls the Billboard hits from playback.fm and populates a CSV for each song
 # with the matching spotify URL.
-#
-# To be used for print and play of a song guessing game, or perhaps for
-# other purposes as well.
 #
 # See my accompanying game digital-rock-expert that can be played using
 # the CSV as input for a digital version of the game.
 #
+# Apologies, I haven't spent time cleaning the code for reusability,
+# so you will need to wrangle this a bit but it hopefully gets you
+# 90% there.
 #
 # Author - Steve Holl
 # Initial Release August 2024
@@ -20,6 +23,7 @@ import re
 from datetime import datetime
 from time import sleep
 
+import pandas as pd
 import qrcode
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
@@ -30,18 +34,6 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.utils import ImageReader
 from fuzzywuzzy import fuzz
 from fuzzywuzzy import process
-from ratelimit import limits, sleep_and_retry
-
-# Set up your Spotify API credentials
-CLIENT_ID =  'REDACTED'
-SECRET = 'REDACTED'
-
-@sleep_and_retry
-@limits(calls=44, period=30)
-def _spotify_search_wrapper(sp,query):
-    '''Wrapper to prevent exceeding spotify rate limits.'''
-    result = sp.search(query, type='track', limit=1)
-    return result
 
 def _clean_artist_name(artist_name):
     '''Cleans up the artist name to optimize spotify search results.'''
@@ -64,11 +56,11 @@ def _clean_artist_name(artist_name):
         pass
 
     try:
-        artist_name = artist_name.replace('&','and')
+        artist_name = artist_name.replace(' & ',' and ')
     except:
         pass
 
-    return artist_name
+    return artist_name.lower()
 
 def _clean_title(title):
     '''Cleans up the title to optimize spotify search results.'''
@@ -80,26 +72,31 @@ def _clean_title(title):
         pass
 
     try:
+        title = title.replace("“","")
+    except:
+        pass
+
+    try:
+        title = title.replace("”","")
+    except:
+        pass
+
+    try:
+        title = title.replace("’","")
+    except:
+        pass
+
+    try:
+        title = title.replace("‘","")
+    except:
+        pass
+
+    try:
       title = re.sub(r'\s*\(.*?\)\s*', ' ', title).strip()
     except:
       pass
 
-    return title
-
-def _validate_spotify_url(sp, track_url, artist, title):
-    '''This function tests the spotify URL by getting the URL's artist name and
-    track and doing a fuzzy compare on it. This helps speed the time to audit
-    the results by soring by track or title match score.'''
-    track_id = re.search(r'track/([a-zA-Z0-9]+)', track_url).group(1)
-
-    track = sp.track(track_id)
-    artist_name = track['artists'][0]['name']
-    song_title = track['name']
-
-    artist_sim = fuzz.ratio(artist_name,artist)
-    title_sim = fuzz.ratio(song_title,title)
-
-    return artist_name, artist_sim, song_title, title_sim
+    return title.lower()
 
 def auth_spotify(CLIENT_ID,SECRET):
   '''Authenticates to spotify and returns an active session.'''
@@ -117,7 +114,7 @@ def auth_spotify(CLIENT_ID,SECRET):
     raise
   return sp
 
-def get_chart_year_links(spotify_session,url):
+def get_chart_year_links(url):
   '''When specified a spotify session and playback.fm URL, scrapes the chart
    list to return a CSV of songs for each year.'''
 
@@ -140,18 +137,17 @@ def get_chart_year_links(spotify_session,url):
   for href in hrefs:
       url_list.append(base_url + href)
 
-  get_chart_year_details(spotify_session,url_list)
+  return url_list
 
-def get_chart_year_details(spotify_session, url_list):
-  '''When specifying a spotify session and playback.fm URL for a year of a
-  chart, scrapes the song list.'''
+def get_chart_year_details(url_list):
+  '''When specifying a list of yearly playback.fm chart urls,
+  scrapes the song list.'''
 
-  sp = spotify_session
-  global my_csv
-  my_csv =  []
-  header = ['chart','year','rank','artist','title','track_url','url_artist','artist_score','url_title','title_score']
-  my_csv.append(header)
+  df = pd.DataFrame(columns=['chart_name','year','rank','artist', \
+                             'spotify_artist','title','spotify_title', \
+                             'spotify_url','artist_match','title_match'])
 
+  song_list = []
 
   for url in url_list:
 
@@ -166,19 +162,18 @@ def get_chart_year_details(spotify_session, url_list):
     soup = BeautifulSoup(html_content, 'html.parser')
     table = soup.find('table', id='myTable')
 
-    data = []
-
-    for row in table.find_all('tr')[1:]: #
+    for row in table.find_all('tr')[1:]: #First row is header
       title = row.find('a', itemprop='name').text.strip()
       artist = row.find('a', class_='artist').text.strip()
       rank = row.find('td').text.strip()
-      track_url = get_track_url_spotify(sp, artist, title, year)
-      a,a_score,b,b_score = _validate_spotify_url(sp,track_url,artist,title)
-      my_csv.append([chart_name,year,rank,artist,title,track_url,a,a_score,b,b_score])
-      #break
-    #break
+      song_list.append([chart_name,year,rank,artist,title])
 
-  filename = f'{chart_name}-{str(datetime.now())}.csv'
+  song_list = pd.DataFrame(song_list,
+                columns=['chart_name','year','rank','artist','title'])
+  return song_list
+
+def write_csv(my_list):
+  filename = f'chart-{str(datetime.now())}.csv'
 
   with open(filename, mode='w', newline='') as file:
     writer = csv.writer(file)
@@ -186,64 +181,223 @@ def get_chart_year_details(spotify_session, url_list):
 
   print(f'\nCSV for Billboard hits written to: {filename}\n\n')
 
-def get_track_url_spotify(sp, artist_name, song_title, year=""):
-    '''Obtains the song URL from the artist name, song title, and year.
-    This may likely exceed Spotify API limits, causing Spotipy API
-    to pause response.'''
 
-    artist_name = _clean_artist_name(artist_name)
-    song_title = _clean_title(song_title)
+def _similarity_check(artist, spotify_artist, title, spotify_title):
+    '''This function tests the spotify URL by getting the URL's artist name and
+    track and doing a fuzzy compare on it. This helps speed the time to audit
+    the results by soring by track or title match score.'''
 
-    query = f"artist:{artist_name} track:{song_title} year:{year}"
-    result = _spotify_search_wrapper(sp,query)
+    artist = _clean_artist_name(artist)
+    spotify_artist_c = _clean_artist_name(spotify_artist)
+    title = _clean_title(title)
+    spotify_title_c = _clean_title(spotify_title)
 
-    if result['tracks']['items']:
-        track_url = result['tracks']['items'][0]['external_urls']['spotify']
-        return track_url
+    artist_match = fuzz.ratio(spotify_artist_c.lower(),artist.lower())
+    title_match = fuzz.ratio(spotify_title_c.lower(),title.lower())
+
+    return artist_match, title_match
+
+
+def search_chunk(chunk,pass_num):
+    results = []
+    for index, row in chunk.iterrows():
+
+      artist_cln = _clean_artist_name(row['artist'])
+      title_cln = _clean_title(row['title'])
+
+      if pass_num == 1:
+        q = f"artist:{artist_cln} track:{title_cln} year:{row['year']}"
+        limit = 1
+      elif pass_num == 2:
+        q = f"artist:{artist_cln} track:{title_cln}"
+        limit = 1
+      elif pass_num == 3:
+        q = f"artist:{artist_cln} track:{title_cln}"
+        limit = 10
+
+      result = sp.search(q=q, type='track', limit=limit)
+      enriched_result = {
+          'chart_name': row['chart_name'],
+          'year': row['year'],
+          'rank': row['rank'],
+          'artist': row['artist'],
+          'title': row['title'],
+          'spotify_result': result
+        }
+      results.append(enriched_result)
+    return results
+
+def get_spotify_urls(df,pass_num):
+  chunk_size = 5
+  all_results = []
+
+  for start in range(0, len(df), chunk_size):
+      end = start + chunk_size
+      chunk = df[start:end]
+      chunk_results = search_chunk(chunk,pass_num)
+      all_results.extend(chunk_results)
+      print(f'Round {pass_num}: {start} of {len(df)}')
+      sleep(2)
+
+  df_1 = pd.DataFrame(columns=['chart_name','year','rank','artist',
+                              'spotify_artist','title','spotify_title',
+                              'spotify_url','artist_match','title_match',
+                              'pass_num'])
+
+  for row in all_results:
+    chart_name = row['chart_name']
+    year = row['year']
+    rank = row['rank']
+    artist = row['artist']
+    title = row['title']
+    r = row['spotify_result']
+
+    if r['tracks']['items']:
+        spotify_url = r['tracks']['items'][0]['external_urls']['spotify']
+        spotify_artist = r['tracks']['items'][0]['artists'][0]['name']
+        spotify_title = r['tracks']['items'][0]['name']
+        artist_match, title_match = _similarity_check(artist, spotify_artist,
+                                                    title, spotify_title)
+
     else:
-        '''try searching without year if we get no results, since hit year
-        may not align with album release year'''
+        spotify_url = ""
+        spotify_artist = ""
+        spotify_title = ""
+        artist_match = "-1"
+        title_match = "-1"
+    data = [[chart_name, year, rank, artist, spotify_artist, title,
+            spotify_title, spotify_url, artist_match, title_match, pass_num]]
+    r_df = pd.DataFrame(data,columns=['chart_name','year','rank','artist',
+                              'spotify_artist','title','spotify_title',
+                              'spotify_url','artist_match','title_match',
+                              'pass_num'])
+    df_1 = pd.concat([df_1,r_df],ignore_index=True)
+  return df_1
 
-        query = f"artist:{artist_name} track:{song_title}"
-        result = _spotify_search_wrapper(sp,query)
-        if result['tracks']['items']:
-            track_url = result['tracks']['items'][0]['external_urls']['spotify']
-            return track_url
-        else:
-            '''Sometimes structured search fails so try unstructured with year'''
-            query = "f{artist_name} {song_title} {year}"
-            result = _spotify_search_wrapper(sp,query)
-            if result['tracks']['items']:
-                track_url = result['tracks']['items'][0]['external_urls']['spotify']
-                return track_url
-            else:
-                '''Try unstructured search without year'''
-                query = f"{artist_name} {song_title}"
-                result = _spotify_search_wrapper(sp,query)
-                if result['tracks']['items']:
-                    track_url = result['tracks']['items'][0]['external_urls']['spotify']
-                    return track_url
-                else:
-                    print(f"INFO: Could not fetch URL for {year} {artist_name} {song_title}")
-                    return None
+def enhanced_spotify_search(df):
+  '''This search returns 10 results and hunts for the best result. It is used
+  for results that don't have 100% probability match, to improve results.'''
 
+  # !!! There is an issue in here that is returning other rows when matches fail.
 
-# ########################################################################
-# This is example code to run and populate the billboard hit csvs. 
-# See the /charts folder for ones that have already been pulled down.
-# ########################################################################
+  df_r3 = pd.DataFrame(columns=['chart_name','year','rank','artist',
+                              'spotify_artist','title','spotify_title',
+                              'spotify_url','artist_match','title_match',
+                              'pass_num'])
+  c = 0
 
-my_csv = [] #this is a global variable
-url_list = []
-sp = auth_spotify(CLIENT_ID, SECRET)
+  for index, row in df.iterrows():
+    chart_name = row['chart_name']
+    year = row['year']
+    rank = row['rank']
+    artist = row['artist']
+    title = row['title']
 
-get_chart_year_links(sp,'https://playback.fm/charts/rock/')
+    artist_cln = _clean_artist_name(artist)
+    title_cln = _clean_title(title)
+
+    q = f"artist:{artist_cln} track:{title_cln}"
+
+    results = sp.search(q, type='track', limit=10)
+
+    if results['tracks']['items']:
+      best_result = {
+        "match_avg": "-1",
+        "artist_match": "-1",
+        "title_match": "-1",
+        "spotify_url": "",
+        "spotify_artist": "",
+        "spotify_title": ""
+      }
+
+      for r in results['tracks']['items']:
+        spotify_url = r['external_urls']['spotify']
+        spotify_artist = r['artists'][0]['name']
+        spotify_title = r['name']
+
+        #Filter out versions we usually aren't interested in
+        if 'live' not in spotify_title.lower() and \
+            'acoustic' not in spotify_title.lower() and \
+            'remix' not in spotify_title.lower():
+          artist_match, title_match = _similarity_check(artist, spotify_artist,
+                                                        title, spotify_title)
+          #Pick best similarity match
+          match_avg = (float(artist_match) + float(title_match)) / 2
+
+          if float(match_avg) > float(best_result['match_avg']):
+            best_result['match_avg'] = match_avg
+            best_result['artist_match'] = artist_match
+            best_result['title_match'] = title_match
+            best_result['spotify_url'] = spotify_url
+            best_result['spotify_artist'] = spotify_artist
+            best_result['spotify_title'] = spotify_title
+        artist_match = best_result['artist_match']
+        title_match = best_result['title_match']
+        spotify_url = best_result['spotify_url']
+        spotify_artist = best_result['spotify_artist']
+        spotify_title = best_result['spotify_title']
+
+    data = [[chart_name, year, rank, artist, spotify_artist, title,
+            spotify_title, spotify_url, artist_match, title_match, "3"]]
+    r_df = pd.DataFrame(data,columns=['chart_name','year','rank','artist',
+                              'spotify_artist','title','spotify_title',
+                              'spotify_url','artist_match','title_match',
+                              'pass_num'])
+
+    df_r3 = pd.concat([df_r3,r_df],ignore_index=True)
+    c += 1
+    if c == 1 or c % 10 == 0:
+      print(f'Round 3: {c} of {len(df)} fetched.')
+    sleep(1)
+
+  return df_r3
+
+###########
+##  RUN ME
+###########
+
+#New
+CLIENT_ID = 'REDACTED'
+SECRET = 'REDACTED'
+
+#Other charts to use
+# get_chart_year_links(sp,'https://playback.fm/charts/rock/')
 # get_chart_year_links(sp,'https://playback.fm/charts/top-100-songs')
 # get_chart_year_links(sp,'https://playback.fm/charts/country/')
 # get_chart_year_links(sp,'https://playback.fm/charts/rnb/')
 
-filename = f'hitlist-{str(datetime.now())}.csv'
+sp = auth_spotify(CLIENT_ID, SECRET)
+url_list = get_chart_year_links('https://playback.fm/charts/rock/')
+song_list = get_chart_year_details(url_list)
 
-with open(filename, mode='w', newline='') as file:
-  writer = csv.writer(file)
-  writer.writerows(my_csv)
+#Try search with artist, title, and year
+df_r1 = get_spotify_urls(song_list,1)
+df_r1.to_excel('df1.xlsx')
+
+#Try search without year for results that did not return the first time
+df_r2 = df_r1[(df_r1['artist_match'] == "-1") & (df_r1['title_match'] == "-1")]
+df_r2 = get_spotify_urls(df_r2,2)
+df_r2.to_excel('df2.xlsx')
+
+#Merge dfs from both search rounds
+df_r1 = df_r1.set_index(['year','rank'])
+df_r2 = df_r2.set_index(['year','rank'])
+df_r1.update(df_r2)
+df_r1 = df_r1.reset_index()
+df_r1.to_excel('df1-merged.xlsx')
+
+#Pull any results without a perfect match and run enhanced search
+
+df_r1['artist_match'] = pd.to_numeric(df_r1['artist_match'], errors='coerce')
+df_r1['title_match'] = pd.to_numeric(df_r1['title_match'], errors='coerce')
+df_r3 = df_r1[(df_r1['artist_match'] < 100) | (df_r1['title_match'] < 100)]
+
+df_r3 = enhanced_spotify_search(df_r3)
+df_r3.to_excel('df3.xlsx')
+
+#Merge dfs
+df_r1 = df_r1.set_index(['year','rank'])
+df_r3 = df_r3.set_index(['year','rank'])
+df_r1.update(df_r3)
+df_r1 = df_r1.reset_index()
+df_r1.to_excel('df1-merged-w-3-final.xlsx')
